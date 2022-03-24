@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-@Author  : Fang Yao 
+@Author  : Fang Yao
 @Time    : 2021/4/1 6:07 下午
 @FileName: gui.py
 @desc: 字幕提取器图形化界面
@@ -138,7 +138,7 @@ class SubtitleExtractorGUI:
                           key='-FILE-BD_BTN-'),
              ],
             # 输出区域
-            [sg.Output(size=(70, 10), font='Courier 10'),
+            [
              sg.Frame(title=self.interface_config['SubtitleExtractorGUI']['Vertical'], layout=[[
                  sg.Slider(range=(0, 0), orientation='v', size=(10, 20),
                            # disable_number_display=True,

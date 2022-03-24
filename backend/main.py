@@ -9,6 +9,7 @@ import re
 import os
 import random
 import shutil
+import time
 from collections import Counter
 import unicodedata
 from threading import Thread
@@ -33,7 +34,7 @@ from tools.infer.predict_det import TextDetector
 from tools.infer.predict_system import TextSystem
 import threading
 import platform
-
+from celery import group
 
 # 加载文本检测+识别模型
 class OcrRecogniser:
@@ -224,7 +225,10 @@ class SubtitleExtractor:
         print(interface_config['Main']['StartFindSub'])
         # 重置进度条
         self.progress = 0
+        T1 = time.time()
         self.extract_subtitles()
+        T2 = time.time()
+        print('GPU运行时间:%s毫秒' % ((T2 - T1)*1000))
         print(interface_config['Main']['FinishFindSub'])
 
         if self.sub_area is None:
@@ -532,12 +536,29 @@ class SubtitleExtractor:
             os.remove(self.raw_subtitle_path)
         # 新建文件
         f = open(self.raw_subtitle_path, mode='w+', encoding='utf-8')
+        from tasks import predict1
+
+        ocr_datas = []
+        jobs = []
+        for i, frame in enumerate(frame_list):
+            # # 读取视频帧
+            # img = cv2.imread(os.path.join(self.frame_output_dir, frame))
+            # # 获取检测结果
+            # dt_box, rec_res = text_recogniser.predict(img)
+            # ocr_datas.append([dt_box, rec_res])
+            jobs.append(predict1.si(self.frame_output_dir, frame))
+
+        task_group = group(jobs)
+        result_group = task_group()
+        ocr_datas = result_group.get()
 
         for i, frame in enumerate(frame_list):
-            # 读取视频帧
-            img = cv2.imread(os.path.join(self.frame_output_dir, frame))
-            # 获取检测结果
-            dt_box, rec_res = text_recogniser.predict(img)
+            # img = cv2.imread(os.path.join(self.frame_output_dir, frame))
+            # # 获取检测结果
+            # dt_box, rec_res = text_recogniser.predict(img)
+            ocr_data = ocr_datas[i]
+            dt_box = ocr_data[0]
+            rec_res = ocr_data[1]
             # 获取文本坐标
             coordinates = self.__get_coordinates(dt_box)
             # 将结果写入txt文本中
@@ -559,8 +580,8 @@ class SubtitleExtractor:
                     ymin = coordinate[2]
                     ymax = coordinate[3]
                     if s_xmin <= xmin and xmax <= s_xmax and s_ymin <= ymin and ymax <= s_ymax:
-                        print(content[0])
-                        if content[1] > config.DROP_SCORE:
+                        print(content[0], content[1])
+                        if float(content[1]) > config.DROP_SCORE:
                             f.write(f'{os.path.splitext(frame)[0]}\t'
                                     f'{coordinate}\t'
                                     f'{content[0]}\n')
@@ -1108,15 +1129,18 @@ class SubtitleExtractor:
 
 
 if __name__ == '__main__':
-    # 提示用户输入视频路径
-    video_path = input(f"{interface_config['Main']['InputVideo']}").strip()
-    # 提示用户输入字幕区域
-    try:
-        y_min, y_max, x_min, x_max = map(int, input(f"{interface_config['Main']['ChooseSubArea']} (ymin ymax xmin "
-                                                 f"xmax)：").split())
-        subtitle_area = (y_min, y_max, x_min, x_max)
-    except ValueError as e:
-        subtitle_area = None
+    video_path = "D:/1.mkv"
+    y_min, y_max, x_min, x_max = 918,1076,134,1785
+    subtitle_area = (y_min, y_max, x_min, x_max)
+    # # 提示用户输入视频路径
+    # video_path = input(f"{interface_config['Main']['InputVideo']}").strip()
+    # # 提示用户输入字幕区域
+    # try:
+    #     y_min, y_max, x_min, x_max = map(int, input(f"{interface_config['Main']['ChooseSubArea']} (ymin ymax xmin "
+    #                                              f"xmax)：").split())
+    #     subtitle_area = (y_min, y_max, x_min, x_max)
+    # except ValueError as e:
+    #     subtitle_area = None
     # 新建字幕提取对象
     se = SubtitleExtractor(video_path, subtitle_area)
     # 开始提取字幕
