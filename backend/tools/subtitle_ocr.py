@@ -4,7 +4,6 @@ from multiprocessing import Queue, Process
 import cv2
 from PIL import ImageFont, ImageDraw, Image
 from tqdm import tqdm
-from tools.ocr import OcrRecogniser, get_coordinates
 from tools.constant import SubtitleArea
 from tools import constant
 from threading import Thread
@@ -14,6 +13,8 @@ from types import SimpleNamespace
 import shutil
 import numpy as np
 from collections import namedtuple
+import time
+
 
 
 def extract_subtitles(data, text_recogniser, img, raw_subtitle_file,
@@ -26,10 +27,10 @@ def extract_subtitles(data, text_recogniser, img, raw_subtitle_file,
     rec_res = rec_res_arg
     # 如果没有检测结果，则获取检测结果
     if dt_box is None or rec_res is None:
-        dt_box, rec_res = text_recogniser.predict(img)
+        dt_box, rec_res = text_recogniser.predict(img, sub_area)
         # rec_res格式为： ("hello", 0.997)
     # 获取文本坐标
-    coordinates = get_coordinates(dt_box)
+    coordinates = text_recogniser.get_coordinates(dt_box)
     # 将结果写入txt文本中
     if options.REC_CHAR_TYPE == 'en':
         # 如果识别语言为英文，则去除中文
@@ -116,6 +117,29 @@ def paint_chinese_opencv(im, chinese, pos, color):
     img = np.asarray(img_pil)
     return img
 
+# 防止在线程中 插入导致死锁
+# Thread 22984 (idle): "Thread-1"
+#     wait (threading.py:302)
+#     put (queue.py:139)
+#     ocr_task_producer (backend\tools\subtitle_ocr.py:203)
+#     run (threading.py:870)
+#     _bootstrap_inner (threading.py:932)
+#     _bootstrap (threading.py:890)
+def queue_put_wait(q, item):
+    while True:
+        try:
+            q.put(item, block=False)
+            return
+        except queue.Full as e:
+            print(e)
+            time.sleep(0)
+
+def queue_put_nowait(q, item):
+    try:
+        q.put(item, block=False)
+    except queue.Full as e:
+        print(e)
+
 
 def ocr_task_consumer(ocr_queue, raw_subtitle_path, sub_area, video_path, options):
     """
@@ -127,6 +151,11 @@ def ocr_task_consumer(ocr_queue, raw_subtitle_path, sub_area, video_path, option
     :param options
     """
     data = {'i': 1}
+    global OcrRecogniser
+    if options.OCR_ENGINE == 'tr':
+        from tools.trwebocr import OcrRecogniser
+    else:
+        from tools.ocr import OcrRecogniser
     # 初始化文本识别对象
     text_recogniser = OcrRecogniser()
     # 丢失字幕的存储路径
@@ -167,13 +196,13 @@ def ocr_task_producer(ocr_queue, task_queue, progress_queue, video_path, raw_sub
         try:
             # 从任务队列中提取任务信息
             total_frame_count, current_frame_no, dt_box, rec_res, total_ms, default_subtitle_area = task_queue.get(block=True)
-            progress_queue.put(current_frame_no)
+            queue_put_nowait(progress_queue, current_frame_no)
             if tbar is None:
                 tbar = tqdm(total=round(total_frame_count), position=1)
             # current_frame 等于-1说明所有视频帧已经读完
             if current_frame_no == -1:
                 # ocr识别队列加入结束标志
-                ocr_queue.put((-1, None, None, None))
+                queue_put_wait(ocr_queue, (-1, None, None, None))
                 # 更新进度条
                 tbar.update(tbar.total - tbar.n)
                 break
@@ -195,7 +224,7 @@ def ocr_task_producer(ocr_queue, task_queue, progress_queue, video_path, raw_sub
                 # 根据默认字幕位置，则对视频帧进行裁剪，裁剪后处理
                 if default_subtitle_area is not None:
                     frame = frame_preprocess(default_subtitle_area, frame)
-                ocr_queue.put((current_frame_no, frame, dt_box, rec_res))
+                queue_put_wait(ocr_queue, (current_frame_no, frame, dt_box, rec_res))
         except Exception as e:
             print(e)
             break
@@ -239,11 +268,13 @@ def async_start(video_path, raw_subtitle_path, sub_area, options):
     options.DROP_SCORE
     options.SUB_AREA_DEVIATION_RATE
     options.DEBUG_OCR_LOSS
+    options.OCR_ENGINE
     """
     assert 'REC_CHAR_TYPE' in options, "options缺少参数：REC_CHAR_TYPE"
     assert 'DROP_SCORE' in options, "options缺少参数: DROP_SCORE'"
     assert 'SUB_AREA_DEVIATION_RATE' in options, "options缺少参数: SUB_AREA_DEVIATION_RATE"
     assert 'DEBUG_OCR_LOSS' in options, "options缺少参数: DEBUG_OCR_LOSS"
+    assert 'OCR_ENGINE' in options, "options缺少参数: OCR_ENGINE"
     # 创建一个任务队列
     # 任务格式为：(total_frame_count总帧数, current_frame_no当前帧, dt_box检测框, rec_res识别结果, subtitle_area字幕区域)
     task_queue = Queue()
